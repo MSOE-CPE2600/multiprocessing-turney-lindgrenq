@@ -3,4 +3,4 @@
 mandel
 mandel_movie
 *.jpg
-*.mpg
+# *.mpg

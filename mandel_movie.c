@@ -12,9 +12,11 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <sys/mman.h>
 #include "jpegrw.h"
 
-#define FRAMES 100
+#define FRAMES 50
 
 // local routines
 static int iteration_to_color( int i, int max );
@@ -23,43 +25,53 @@ static void compute_image( imgRawImage *img, double xmin, double xmax,
 									double ymin, double ymax, int max );
 static void show_help();
 
+typedef struct parameters{
+	double xcenter;
+	double ycenter;
+	double xscale;
+	double yscale;
+	int image_width;
+	int image_height;
+	int max;
+	int nproc;
+	int acproc;
+}parameters;
 
 int main( int argc, char *argv[] )
 {
 	char c;
+	parameters params_vals = {0,0,4,0,1000,1000,1000,1,1};
+	parameters *params = &params_vals;
+	mmap(params, sizeof(*params), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
 	// These are the default configuration values used
 	// if no command line arguments are given.
 	char outfile[FRAMES][16]; // store every file name in string array
-	double xcenter = 0;
-	double ycenter = 0;
-	double xscale = 4;
-	double yscale = 0; // calc later
-	int    image_width = 1000;
-	int    image_height = 1000;
-	int    max = 1000;
 	// For each command line argument given,
 	// override the appropriate configuration value.
-    while((c = getopt(argc,argv,"x:y:s:W:H:m:h"))!=-1) {
+    while((c = getopt(argc,argv,"x:y:s:W:H:m:n:h"))!=-1) {
 		switch(c) 
 		{
 			case 'x':
-				xcenter = atof(optarg);
+				params->xcenter = atof(optarg);
 				break;
 			case 'y':
-				ycenter = atof(optarg);
+				params->ycenter = atof(optarg);
 				break;
 			case 's':
-				xscale = atof(optarg);
+				params->xscale = atof(optarg);
 				break;
 			case 'W':
-				image_width = atoi(optarg);
+				params->image_width = atoi(optarg);
 				break;
 			case 'H':
-				image_height = atoi(optarg);
+				params->image_height = atoi(optarg);
 				break;
 			case 'm':
-				max = atoi(optarg);
+				params->max = atoi(optarg);
+				break;
+			case 'n':
+				params->nproc = atoi(optarg);
 				break;
 			case 'h':
 				show_help();
@@ -68,33 +80,48 @@ int main( int argc, char *argv[] )
 		}
 	}
 	
-	double incr = xscale / FRAMES;
     for(int i = 0; i < FRAMES; i++){
+		if(params->acproc > params->nproc){ 
+			wait(NULL);
+			params->acproc = params->acproc - 1;
+		}
+		int pid = fork();
+		if(pid == 0){
+				
 		sprintf(outfile[i],"mandel%d.jpg",i);
+		params->xscale = params->xscale + (0.001 * 0.5*i); // increment scale to zoom
+				// Calculate y scale based on x scale (settable) and image sizes in X and Y (settable)
+				params->yscale = params->xscale / params->image_width * params->image_height;
 
-        // Calculate y scale based on x scale (settable) and image sizes in X and Y (settable)
-        yscale = xscale / image_width * image_height;
+				// Display the configuration of the image.
+				printf("mandel%d: x=%lf y=%lf xscale=%lf yscale=%1f max=%d outfile=%s\n",i,params->xcenter,params->ycenter,params->xscale,params->yscale,params->max,outfile[i]);
 
-        // Display the configuration of the image.
-        printf("mandel: x=%lf y=%lf xscale=%lf yscale=%1f max=%d outfile=%s\n",xcenter,ycenter,xscale,yscale,max,outfile[i]);
+				// Create a raw image of the appropriate size.
+				imgRawImage* img = initRawImage(params->image_width,params->image_height);
 
-        // Create a raw image of the appropriate size.
-        imgRawImage* img = initRawImage(image_width,image_height);
+				// Fill it with a black
+				setImageCOLOR(img,0);
 
-        // Fill it with a black
-        setImageCOLOR(img,0);
+				// Compute the Mandelbrot image
+				compute_image(img,params->xcenter-params->xscale/2,params->xcenter+params->xscale/2,params->ycenter-params->yscale/2,params->ycenter+params->yscale/2,params->max);
 
-        // Compute the Mandelbrot image
-        compute_image(img,xcenter-xscale/2,xcenter+xscale/2,ycenter-yscale/2,ycenter+yscale/2,max);
+				// Save the image in the stated file.
+				storeJpegImageFile(img,outfile[i]);
 
-        // Save the image in the stated file.
-        storeJpegImageFile(img,outfile[i]);
+				// free the mallocs
+				freeRawImage(img);
 
-        // free the mallocs
-        freeRawImage(img);
-
-		xscale -= incr; // increment scale to zoom out
+				exit(0);
+		} else{
+			params->acproc = params->acproc + 1;;
+		}
     }
+	while(params->acproc > 0){
+		wait(NULL);
+		params->acproc = params->acproc - 1;
+	}
+
+	munmap(params, sizeof(*params));
 
 	return 0;
 }
@@ -182,6 +209,7 @@ void show_help()
 	printf("-s <scale>  Scale of the image in Mandlebrot coordinates (X-axis). (default=4)\n");
 	printf("-W <pixels> Width of the image in pixels. (default=1000)\n");
 	printf("-H <pixels> Height of the image in pixels. (default=1000)\n");
+	printf("-n <procs> Number of precesses to split into\n");
 	printf("-h          Show this help text.\n");
 	printf("\nSome examples are:\n");
 	printf("mandel_movie -x -0.5 -y -0.5 -s 0.2\n");
