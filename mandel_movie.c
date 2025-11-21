@@ -5,8 +5,8 @@
 //
 //  Converted to use jpg instead of BMP and other minor changes
 //  Quinn Lindgren
-//  11/11/25
-//  CPE 2600 Lab 11
+//  11/18/25
+//  CPE 2600 Lab 12
 ///
 #include <stdlib.h>
 #include <stdio.h>
@@ -14,6 +14,7 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <sys/mman.h>
+#include <pthread.h>
 #include "jpegrw.h"
 
 #define FRAMES 50
@@ -21,8 +22,9 @@
 // local routines
 static int iteration_to_color( int i, int max );
 static int iterations_at_point( double x, double y, int max );
+static void* compute_section(void* params);
 static void compute_image( imgRawImage *img, double xmin, double xmax,
-									double ymin, double ymax, int max );
+									double ymin, double ymax, int max, int num_threads );
 static void show_help();
 
 typedef struct parameters{
@@ -35,13 +37,26 @@ typedef struct parameters{
 	int max;
 	int nproc;
 	int acproc;
+	int nthreads;
 }parameters;
+
+typedef struct thread_parameters{
+    imgRawImage *img;
+    double xmin;
+	double xmax;
+	double ymin;
+	double ymax;
+    int max;
+    int start;
+    int end;
+}thread_parameters;
+
 
 int main( int argc, char *argv[] )
 {
 	char c;
-	parameters params_vals = {0,0,4,0,1000,1000,1000,1,1};
-	parameters *params = &params_vals;
+	parameters param_vals = {0,0,4,0,1000,1000,1000,1,1,1};
+	parameters *params = &param_vals;
 	mmap(params, sizeof(*params), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
 	// These are the default configuration values used
@@ -49,7 +64,7 @@ int main( int argc, char *argv[] )
 	char outfile[FRAMES][16]; // store every file name in string array
 	// For each command line argument given,
 	// override the appropriate configuration value.
-    while((c = getopt(argc,argv,"x:y:s:W:H:m:n:h"))!=-1) {
+    while((c = getopt(argc,argv,"x:y:s:W:H:m:n:t:h"))!=-1) {
 		switch(c) 
 		{
 			case 'x':
@@ -73,11 +88,22 @@ int main( int argc, char *argv[] )
 			case 'n':
 				params->nproc = atoi(optarg);
 				break;
+			case 't':
+				params->nthreads = atoi(optarg);
+				break;
 			case 'h':
 				show_help();
 				exit(1);
 				break;
 		}
+	}
+
+	if(params->nproc < 1){
+		printf("Must use at least one process - using default (1)\n");
+		params->nproc = 1;
+	} else if(params->nthreads < 1){
+		printf("Must use at least one thread - using default (1)\n");
+		params->nthreads = 1;
 	}
 	
     for(int i = 0; i < FRAMES; i++){
@@ -103,7 +129,7 @@ int main( int argc, char *argv[] )
 				setImageCOLOR(img,0);
 
 				// Compute the Mandelbrot image
-				compute_image(img,params->xcenter-params->xscale/2,params->xcenter+params->xscale/2,params->ycenter-params->yscale/2,params->ycenter+params->yscale/2,params->max);
+				compute_image(img,params->xcenter-params->xscale/2,params->xcenter+params->xscale/2,params->ycenter-params->yscale/2,params->ycenter+params->yscale/2,params->max,params->nthreads);
 
 				// Save the image in the stated file.
 				storeJpegImageFile(img,outfile[i]);
@@ -160,30 +186,54 @@ Compute an entire Mandelbrot image, writing each point to the given bitmap.
 Scale the image to the range (xmin-xmax,ymin-ymax), limiting iterations to "max"
 */
 
-void compute_image(imgRawImage* img, double xmin, double xmax, double ymin, double ymax, int max )
+void compute_image(imgRawImage* img, double xmin, double xmax, double ymin, double ymax, int max, int num_threads )
 {
-	int i,j;
-
-	int width = img->width;
 	int height = img->height;
 
-	// For every pixel in the image...
+	pthread_t threads[num_threads];
+	thread_parameters tparams[num_threads];
+	int row_thread = height / num_threads;
 
-	for(j=0;j<height;j++) {
+	for (int i = 0; i < num_threads; i++){
+		tparams[i].img = img;
+		tparams[i].xmin = xmin;
+		tparams[i].xmax = xmax;
+		tparams[i].ymin = ymin;
+		tparams[i].ymax = ymax;
+		tparams[i].max = max;
+		tparams[i].start = i * row_thread;
+		if(i == num_threads - 1){
+			tparams[i].end = height;
+		} else{
+			tparams[i].end = (i + 1) * row_thread;
+		}
+		pthread_create(&threads[i], NULL, compute_section, &tparams[i]);
+	}
+	for(int i = 0; i < num_threads; i++){
+		pthread_join(threads[i], NULL);
+	}
+}
 
-		for(i=0;i<width;i++) {
+void* compute_section(void* params){
+	thread_parameters *tparams = (thread_parameters*) params;
+	int width = tparams->img->width;
+
+	for(int j=tparams->start;j<tparams->end;j++) {
+
+		for(int i=0;i<width;i++) {
 
 			// Determine the point in x,y space for that pixel.
-			double x = xmin + i*(xmax-xmin)/width;
-			double y = ymin + j*(ymax-ymin)/height;
+			double x = tparams->xmin + i*(tparams->xmax-tparams->xmin)/width;
+			double y = tparams->ymin + j*(tparams->ymax-tparams->ymin)/tparams->img->height;
 
 			// Compute the iterations at that point.
-			int iters = iterations_at_point(x,y,max);
+			int iters = iterations_at_point(x,y,tparams->max);
 
 			// Set the pixel in the bitmap.
-			setPixelCOLOR(img,i,j,iteration_to_color(iters,max));
+			setPixelCOLOR(tparams->img,i,j,iteration_to_color(iters,tparams->max));
 		}
 	}
+	return NULL;
 }
 
 
@@ -209,7 +259,8 @@ void show_help()
 	printf("-s <scale>  Scale of the image in Mandlebrot coordinates (X-axis). (default=4)\n");
 	printf("-W <pixels> Width of the image in pixels. (default=1000)\n");
 	printf("-H <pixels> Height of the image in pixels. (default=1000)\n");
-	printf("-n <procs> Number of precesses to split into\n");
+	printf("-n <procs> Number of processes to split into\n");
+	printf("-t <threads> Number of threads to split into\n");
 	printf("-h          Show this help text.\n");
 	printf("\nSome examples are:\n");
 	printf("mandel_movie -x -0.5 -y -0.5 -s 0.2\n");
